@@ -84,8 +84,16 @@ pick_session() {
         [[ "$include_new" == true ]] && extra=1
         local menu_lines=$(( count + 7 + extra ))
 
-        # Clear previous draw (move up prev_lines, clear to end of screen)
-        [[ $prev_lines -gt 0 ]] && printf '\033[%dA\033[J' "$prev_lines" >&2
+        if [[ $prev_lines -gt 0 ]]; then
+            # Clear previous draw (move up prev_lines, clear to end of screen)
+            printf '\033[%dA\033[J' "$prev_lines" >&2
+        else
+            # First draw: pre-reserve vertical space so the first Enter doesn't
+            # scroll the terminal and shift the menu up by one line.
+            local j
+            for ((j = 0; j < menu_lines; j++)); do printf '\n' >&2; done
+            printf '\033[%dA' "$menu_lines" >&2
+        fi
         prev_lines=$menu_lines
 
         # Draw
@@ -136,7 +144,13 @@ pick_action() {
     local prev_lines=0
 
     while true; do
-        [[ $prev_lines -gt 0 ]] && printf '\033[%dA\033[J' "$prev_lines" >&2
+        if [[ $prev_lines -gt 0 ]]; then
+            printf '\033[%dA\033[J' "$prev_lines" >&2
+        else
+            local j
+            for ((j = 0; j < menu_lines; j++)); do printf '\n' >&2; done
+            printf '\033[%dA' "$menu_lines" >&2
+        fi
         prev_lines=$menu_lines
 
         echo >&2
@@ -174,7 +188,13 @@ collision_prompt() {
     local prev_lines=0
 
     while true; do
-        [[ $prev_lines -gt 0 ]] && printf '\033[%dA\033[J' "$prev_lines" >&2
+        if [[ $prev_lines -gt 0 ]]; then
+            printf '\033[%dA\033[J' "$prev_lines" >&2
+        else
+            local j
+            for ((j = 0; j < menu_lines; j++)); do printf '\n' >&2; done
+            printf '\033[%dA' "$menu_lines" >&2
+        fi
         prev_lines=$menu_lines
 
         echo >&2
