@@ -2,14 +2,15 @@
 # apt-tmux — tmux session manager
 #
 # Commands:
-#   (no args)                    Auto: new if none, attach if one, pick if many
+#   (no args)                    Open the interactive session manager
 #   new [name] [-- cmd...]       New session; collision handling if name exists
 #   attach [name]                Attach to session; picker if name omitted
 #   kill [name]                  Kill session; picker if name omitted
 #   rename [old] [new]           Rename session; picker if old omitted
 #   replace [name] [-- cmd...]   Kill existing (if any) and create fresh
 #   list                         List sessions (scriptable, one per line)
-#   manage                       Interactive session manager
+#   manage                       Interactive session manager (default)
+#   auto                         Smart attach: new if none, attach if one, pick if many
 #
 # Flag (attach, kill, rename, and no-args mode):
 #   --no-pick    Fail with an error instead of showing an interactive picker
@@ -509,14 +510,15 @@ usage() {
     cat <<EOF
 Usage: $SELF <command> [args]
 
-  (no args)                    Auto: new if none, attach if one, pick if many
+  (no args)                    Open the interactive session manager
   new [name] [-- cmd...]       New session; collision handling if name exists
   attach [name]                Attach to session; picker if name omitted
   kill [name]                  Kill session; picker if name omitted
   rename [old] [new]           Rename session; picker if old omitted
   replace [name] [-- cmd...]   Kill existing (if any) and create fresh
   list                         List sessions (one per line, scriptable)
-  manage                       Interactive session manager
+  manage                       Interactive session manager (default)
+  auto                         Smart attach: new if none, attach if one, pick if many
 
 Flag (attach, kill, rename, no-args):
   --no-pick    Fail with an error instead of showing an interactive picker
@@ -540,7 +542,8 @@ case "${1:-}" in
     replace)   shift; cmd_replace "$@" ;;
     list)      cmd_list ;;
     manage)    cmd_manage ;;
-    "")        cmd_auto ;;
+    auto)      shift; cmd_auto "$@" ;;
+    "")        cmd_manage ;;
     --no-pick) cmd_auto --no-pick ;;
     *)         [[ -f "$1" ]] && cmd_script "$1" || usage ;;
 esac

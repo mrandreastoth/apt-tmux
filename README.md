@@ -12,11 +12,21 @@ ln -s /path/to/apt-tmux/apt-tmux ~/.local/bin/apt-tmux
 
 ## Commands
 
-### Auto (no args)
+### Default (no args)
 
 ```bash
 apt-tmux
 ```
+
+Opens the interactive session manager. Equivalent to `apt-tmux manage`.
+
+### auto
+
+```bash
+apt-tmux auto
+```
+
+Smart attach without the manager UI:
 
 - No sessions → creates a new one and attaches
 - One session → attaches to it
