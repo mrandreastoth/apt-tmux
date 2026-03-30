@@ -2,12 +2,17 @@
 # apt-tmux — tmux session manager
 #
 # Commands:
-#   (no args)              Auto: new if none, attach if one, pick if many
-#   new [name] [-- cmd...] New session; collision handling if name exists
-#   attach [name]          Attach to session; interactive picker if name omitted
-#   kill [name]            Kill session; interactive picker if name omitted
-#   replace [name] [-- cmd...] Kill existing (if any) and create fresh
-#   list                   List sessions
+#   (no args)                    Auto: new if none, attach if one, pick if many
+#   new [name] [-- cmd...]       New session; collision handling if name exists
+#   attach [name]                Attach to session; picker if name omitted
+#   kill [name]                  Kill session; picker if name omitted
+#   rename [old] [new]           Rename session; picker if old omitted
+#   replace [name] [-- cmd...]   Kill existing (if any) and create fresh
+#   list                         List sessions (scriptable, one per line)
+#   manage                       Interactive session manager
+#
+# Flag (attach, kill, rename, and no-args mode):
+#   --no-pick    Fail with an error instead of showing an interactive picker
 #
 # Shebang usage — create an executable script with #!/usr/bin/env apt-tmux:
 #   #apt:session=name        Session name (default: script filename without extension)
@@ -46,8 +51,11 @@ do_new() {
 # ── interactive ──────────────────────────────────────────────────────────────
 
 # Display a numbered session list and return the chosen session name.
+# Captures the session list into a local array at call time; all input
+# resolution uses that snapshot — never a fresh tmux query.
 # Optionally includes an "n) New session" option.
-# Prints the chosen name, "NEW", or "" (cancel) to stdout.
+# Always includes r) Refresh and q) Cancel.
+# Prints to stdout: a session name | "NEW" | "REFRESH" | "" (cancel)
 pick_session() {
     local include_new="${1:-false}"
 
@@ -66,23 +74,53 @@ pick_session() {
     done
     echo >&2
     [[ "$include_new" == true ]] && echo "  n) New session" >&2
+    echo "  r) Refresh" >&2
     echo "  q) Cancel" >&2
     echo >&2
 
-    local choice
+    local choice hint="1-$count"
+    [[ "$include_new" == true ]] && hint="$hint, n"
+    hint="$hint, r, q"
+
     while true; do
-        local hint="1-$count"
-        [[ "$include_new" == true ]] && hint="1-$count, n"
-        hint="$hint, q"
         read -rp "[$hint]: " choice </dev/tty
         case "$choice" in
-            q|Q) echo ""; return ;;
+            q|Q) echo "";        return ;;
+            r|R) echo "REFRESH"; return ;;
             n|N) [[ "$include_new" == true ]] && { echo "NEW"; return; } ;;
         esac
         if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= count)); then
             echo "${sessions[$((choice - 1))]}"; return
         fi
         echo "Invalid choice." >&2
+    done
+}
+
+# Display a static action menu for a named session.
+# Prints to stdout: "attach" | "rename" | "replace" | "kill" | "back" | "" (cancel)
+pick_action() {
+    local name="$1"
+    echo >&2
+    echo "Session: $name" >&2
+    echo "  a) Attach" >&2
+    echo "  n) Rename" >&2
+    echo "  r) Replace (kill and recreate)" >&2
+    echo "  k) Kill" >&2
+    echo "  b) Back" >&2
+    echo "  q) Cancel" >&2
+    echo >&2
+    local choice
+    while true; do
+        read -rp "[a, n, r, k, b, q]: " choice </dev/tty
+        case "$choice" in
+            a|A) echo "attach";  return ;;
+            n|N) echo "rename";  return ;;
+            r|R) echo "replace"; return ;;
+            k|K) echo "kill";    return ;;
+            b|B) echo "back";    return ;;
+            q|Q) echo "";        return ;;
+            *) echo "Invalid choice." >&2 ;;
+        esac
     done
 }
 
@@ -102,11 +140,11 @@ collision_prompt() {
     while true; do
         read -rp "[a, r, k, n, q]: " choice </dev/tty
         case "$choice" in
-            a|A) echo attach;  return ;;
-            r|R) echo replace; return ;;
-            k|K) echo kill;    return ;;
-            n|N) echo new;     return ;;
-            q|Q) echo cancel;  return ;;
+            a|A) echo "attach";  return ;;
+            r|R) echo "replace"; return ;;
+            k|K) echo "kill";    return ;;
+            n|N) echo "new";     return ;;
+            q|Q) echo "cancel";  return ;;
             *) echo "Invalid choice." >&2 ;;
         esac
     done
@@ -128,13 +166,21 @@ parse_new_args() {
     done
 }
 
+# ── shared helpers ────────────────────────────────────────────────────────────
+
+_do_rename() {
+    local old="$1" new="$2"
+    tmux rename-session -t "$old" "$new"
+    echo "Renamed: $old → $new" >&2
+}
+
 # ── commands ─────────────────────────────────────────────────────────────────
 
 cmd_new() {
     local _NAME _CMD
     parse_new_args "$@"
     local name="$_NAME"
-    local -a cmd=("${_CMD[@]+"${_CMD[@]}"}")
+    local -a cmd=("${_CMD[@]}")
 
     if [[ -n "$name" ]] && tmux_exists "$name"; then
         local action
@@ -144,7 +190,7 @@ cmd_new() {
                 tmux attach-session -t "$name" ;;
             replace)
                 tmux kill-session -t "$name"
-                do_new "$name" "${cmd[@]+"${cmd[@]}"}" ;;
+                do_new "$name" "${cmd[@]}" ;;
             kill)
                 tmux kill-session -t "$name"
                 echo "Killed: $name" >&2 ;;
@@ -152,17 +198,19 @@ cmd_new() {
                 local newname
                 read -rp "Session name: " newname </dev/tty
                 [[ -z "$newname" ]] && { echo "Cancelled." >&2; return; }
-                do_new "$newname" "${cmd[@]+"${cmd[@]}"}" ;;
+                do_new "$newname" "${cmd[@]}" ;;
             cancel)
                 echo "Cancelled." >&2 ;;
         esac
         return
     fi
 
-    do_new "$name" "${cmd[@]+"${cmd[@]}"}"
+    do_new "$name" "${cmd[@]}"
 }
 
 cmd_attach() {
+    local no_pick=false
+    [[ "${1:-}" == "--no-pick" ]] && { no_pick=true; shift; }
     local name="${1:-}"
 
     if [[ -n "$name" ]]; then
@@ -179,13 +227,24 @@ cmd_attach() {
         1) tmux attach-session; return ;;
     esac
 
+    if [[ "$no_pick" == true ]]; then
+        echo "Multiple sessions exist. Specify a name." >&2; exit 1
+    fi
+
     local selected
-    selected="$(pick_session false)"
-    [[ -z "$selected" ]] && { echo "Cancelled." >&2; return; }
-    tmux attach-session -t "$selected"
+    while true; do
+        selected="$(pick_session false)"
+        case "$selected" in
+            REFRESH) continue ;;
+            "")      echo "Cancelled." >&2; return ;;
+            *)       tmux attach-session -t "$selected"; return ;;
+        esac
+    done
 }
 
 cmd_kill() {
+    local no_pick=false
+    [[ "${1:-}" == "--no-pick" ]] && { no_pick=true; shift; }
     local name="${1:-}"
 
     if [[ -n "$name" ]]; then
@@ -208,23 +267,72 @@ cmd_kill() {
             return ;;
     esac
 
+    if [[ "$no_pick" == true ]]; then
+        echo "Multiple sessions exist. Specify a name." >&2; exit 1
+    fi
+
     local selected
-    selected="$(pick_session false)"
-    [[ -z "$selected" ]] && { echo "Cancelled." >&2; return; }
-    tmux kill-session -t "$selected"
-    echo "Killed: $selected" >&2
+    while true; do
+        selected="$(pick_session false)"
+        case "$selected" in
+            REFRESH) continue ;;
+            "")      echo "Cancelled." >&2; return ;;
+            *)       tmux kill-session -t "$selected"
+                     echo "Killed: $selected" >&2
+                     return ;;
+        esac
+    done
+}
+
+cmd_rename() {
+    local no_pick=false
+    [[ "${1:-}" == "--no-pick" ]] && { no_pick=true; shift; }
+    local old="${1:-}" new="${2:-}"
+
+    # Resolve old name if not given
+    if [[ -z "$old" ]]; then
+        local count
+        count="$(tmux_count)"
+        case "$count" in
+            0) echo "No sessions." >&2; exit 1 ;;
+            1) old="$(tmux_list)" ;;
+            *)
+                if [[ "$no_pick" == true ]]; then
+                    echo "Multiple sessions exist. Specify a name." >&2; exit 1
+                fi
+                local selected
+                while true; do
+                    selected="$(pick_session false)"
+                    case "$selected" in
+                        REFRESH) continue ;;
+                        "")      echo "Cancelled." >&2; return ;;
+                        *)       old="$selected"; break ;;
+                    esac
+                done ;;
+        esac
+    else
+        tmux_exists "$old" || { echo "No session: $old" >&2; exit 1; }
+    fi
+
+    # Resolve new name if not given
+    if [[ -z "$new" ]]; then
+        read -rp "New name for '$old': " new </dev/tty
+        [[ -z "$new" ]] && { echo "Cancelled." >&2; return; }
+    fi
+
+    _do_rename "$old" "$new"
 }
 
 cmd_replace() {
     local _NAME _CMD
     parse_new_args "$@"
     local name="$_NAME"
-    local -a cmd=("${_CMD[@]+"${_CMD[@]}"}")
+    local -a cmd=("${_CMD[@]}")
 
     if [[ -n "$name" ]] && tmux_exists "$name"; then
         tmux kill-session -t "$name"
     fi
-    do_new "$name" "${cmd[@]+"${cmd[@]}"}"
+    do_new "$name" "${cmd[@]}"
 }
 
 cmd_list() {
@@ -238,6 +346,9 @@ cmd_list() {
 }
 
 cmd_auto() {
+    local no_pick=false
+    [[ "${1:-}" == "--no-pick" ]] && no_pick=true
+
     local count
     count="$(tmux_count)"
 
@@ -246,17 +357,76 @@ cmd_auto() {
         1) tmux attach-session; return ;;
     esac
 
-    local selected
-    selected="$(pick_session true)"
+    if [[ "$no_pick" == true ]]; then
+        echo "Multiple sessions exist. Specify a command and session name." >&2; exit 1
+    fi
 
-    case "$selected" in
-        "")    echo "Cancelled." >&2 ;;
-        "NEW")
-            local newname
-            read -rp "Session name (blank for auto): " newname </dev/tty
-            do_new "$newname" ;;
-        *)     tmux attach-session -t "$selected" ;;
-    esac
+    local selected
+    while true; do
+        selected="$(pick_session true)"
+        case "$selected" in
+            REFRESH) continue ;;
+            "")      echo "Cancelled." >&2; return ;;
+            NEW)
+                local newname
+                read -rp "Session name (blank for auto): " newname </dev/tty
+                do_new "$newname"
+                return ;;
+            *)       tmux attach-session -t "$selected"; return ;;
+        esac
+    done
+}
+
+cmd_manage() {
+    while true; do
+        local count
+        count="$(tmux_count)"
+        if [[ "$count" -eq 0 ]]; then
+            echo "No sessions." >&2
+            return
+        fi
+
+        local selected
+        selected="$(pick_session true)"
+        case "$selected" in
+            REFRESH) continue ;;
+            "")      return ;;
+            NEW)
+                local newname
+                read -rp "Session name (blank for auto): " newname </dev/tty
+                local -a new_args=("new-session" "-d")
+                [[ -n "$newname" ]] && new_args+=(-s "$newname")
+                tmux "${new_args[@]}"
+                continue ;;
+            *)
+                local action
+                action="$(pick_action "$selected")"
+                case "$action" in
+                    attach)
+                        tmux attach-session -t "$selected"
+                        return ;;
+                    rename)
+                        local newname
+                        read -rp "New name for '$selected': " newname </dev/tty
+                        if [[ -n "$newname" ]]; then
+                            _do_rename "$selected" "$newname"
+                        else
+                            echo "Cancelled." >&2
+                        fi
+                        continue ;;
+                    replace)
+                        tmux kill-session -t "$selected"
+                        do_new "$selected"
+                        return ;;
+                    kill)
+                        tmux kill-session -t "$selected"
+                        echo "Killed: $selected" >&2
+                        continue ;;
+                    back|"")
+                        continue ;;
+                esac ;;
+        esac
+    done
 }
 
 cmd_script() {
@@ -291,7 +461,7 @@ cmd_script() {
                 tmux attach-session -t "$session_name" ;;
             replace)
                 tmux kill-session -t "$session_name"
-                do_new "$session_name" "${run_cmd[@]+"${run_cmd[@]}"}" ;;
+                do_new "$session_name" "${run_cmd[@]}" ;;
             kill)
                 tmux kill-session -t "$session_name"
                 echo "Killed: $session_name" >&2 ;;
@@ -299,34 +469,34 @@ cmd_script() {
                 local newname
                 read -rp "Session name: " newname </dev/tty
                 [[ -z "$newname" ]] && { echo "Cancelled." >&2; return; }
-                do_new "$newname" "${run_cmd[@]+"${run_cmd[@]}"}" ;;
+                do_new "$newname" "${run_cmd[@]}" ;;
             ask)
                 local action
                 action="$(collision_prompt "$session_name")"
                 case "$action" in
                     attach)  tmux attach-session -t "$session_name" ;;
                     replace) tmux kill-session -t "$session_name"
-                             do_new "$session_name" "${run_cmd[@]+"${run_cmd[@]}"}" ;;
+                             do_new "$session_name" "${run_cmd[@]}" ;;
                     kill)    tmux kill-session -t "$session_name"
                              echo "Killed: $session_name" >&2 ;;
                     new)
                         local newname2
                         read -rp "Session name: " newname2 </dev/tty
                         [[ -z "$newname2" ]] && { echo "Cancelled." >&2; return; }
-                        do_new "$newname2" "${run_cmd[@]+"${run_cmd[@]}"}" ;;
+                        do_new "$newname2" "${run_cmd[@]}" ;;
                     cancel) echo "Cancelled." >&2 ;;
                 esac ;;
             *)  echo "Unknown on-exists value: $on_exists" >&2; exit 1 ;;
         esac
     else
         case "$on_missing" in
-            create) do_new "$session_name" "${run_cmd[@]+"${run_cmd[@]}"}" ;;
+            create) do_new "$session_name" "${run_cmd[@]}" ;;
             error)  echo "No session: $session_name" >&2; exit 1 ;;
             ask)
                 local choice
                 read -rp "Session '$session_name' does not exist. Create? [y/n]: " choice </dev/tty
                 if [[ "$choice" =~ ^[yY]$ ]]; then
-                    do_new "$session_name" "${run_cmd[@]+"${run_cmd[@]}"}"
+                    do_new "$session_name" "${run_cmd[@]}"
                 else
                     echo "Cancelled." >&2
                 fi ;;
@@ -339,12 +509,17 @@ usage() {
     cat <<EOF
 Usage: $SELF <command> [args]
 
-  (no args)                Auto: new if none, attach if one, pick if many
-  new [name] [-- cmd...]   New session; collision handling if name exists
-  attach [name]            Attach to session; interactive picker if omitted
-  kill [name]              Kill session; interactive picker if omitted
-  replace [name] [-- cmd...] Kill existing (if any) and create fresh
-  list                     List sessions
+  (no args)                    Auto: new if none, attach if one, pick if many
+  new [name] [-- cmd...]       New session; collision handling if name exists
+  attach [name]                Attach to session; picker if name omitted
+  kill [name]                  Kill session; picker if name omitted
+  rename [old] [new]           Rename session; picker if old omitted
+  replace [name] [-- cmd...]   Kill existing (if any) and create fresh
+  list                         List sessions (one per line, scriptable)
+  manage                       Interactive session manager
+
+Flag (attach, kill, rename, no-args):
+  --no-pick    Fail with an error instead of showing an interactive picker
 
 Shebang mode — make a script executable with #!/usr/bin/env apt-tmux:
   #apt:session=name        Session name (default: script filename)
@@ -358,11 +533,14 @@ EOF
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
-    new)     shift; cmd_new "$@" ;;
-    attach)  shift; cmd_attach "${1:-}" ;;
-    kill)    shift; cmd_kill "${1:-}" ;;
-    replace) shift; cmd_replace "$@" ;;
-    list)    cmd_list ;;
-    "")      cmd_auto ;;
-    *)       [[ -f "$1" ]] && cmd_script "$1" || usage ;;
+    new)       shift; cmd_new "$@" ;;
+    attach)    shift; cmd_attach "$@" ;;
+    kill)      shift; cmd_kill "$@" ;;
+    rename)    shift; cmd_rename "$@" ;;
+    replace)   shift; cmd_replace "$@" ;;
+    list)      cmd_list ;;
+    manage)    cmd_manage ;;
+    "")        cmd_auto ;;
+    --no-pick) cmd_auto --no-pick ;;
+    *)         [[ -f "$1" ]] && cmd_script "$1" || usage ;;
 esac
