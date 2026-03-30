@@ -80,7 +80,9 @@ pick_session() {
         fi
 
         # Lines drawn: blank + "Sessions:" + count + blank + [n)] + r) + q) + blank + prompt
-        local menu_lines=$(( count + 7 + (include_new == true ? 1 : 0) ))
+        local extra=0
+        [[ "$include_new" == true ]] && extra=1
+        local menu_lines=$(( count + 7 + extra ))
 
         # Clear previous draw (move up prev_lines, clear to end of screen)
         [[ $prev_lines -gt 0 ]] && printf '\033[%dA\033[J' "$prev_lines" >&2
